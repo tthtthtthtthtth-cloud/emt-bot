@@ -8,7 +8,7 @@ from threading import Thread
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 genai.configure(api_key=GEMINI_API_KEY)
 
-# 2. 核心教練設定 (對齊台灣 EMT 規範與安妮教案邏輯)
+# 2. 核心教練設定
 EMT_SYSTEM_PROMPT = """
 你是一個嚴格的台灣「緊急醫療救護 (EMT)」模擬訓練教官。
 請完全依照台灣衛福部法規、消防署 EMT-1/EMT-2 教科書與標準急救指引來進行評估。
@@ -25,12 +25,13 @@ EMT_SYSTEM_PROMPT = """
 4. 結案報告 (AAR)：
    - 當學員完成任務、送醫或病患死亡時，提供詳細的 0-100 分考核報告與條列式檢檢。
 
-現在，請等待學員輸入「!start」來開始一個隨機的模擬案例（可選創傷或內科）。
+現在，請等待學員輸入「!start」來開始一個隨機的模擬案例。
 """
 
-model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=EMT_SYSTEM_PROMPT)
+# 使用目前最穩定的 Gemini 2.0 Flash 模型
+model = genai.GenerativeModel('gemini-2.0-flash', system_instruction=EMT_SYSTEM_PROMPT)
 
-# 記錄不同頻道的遊戲進度 (對話歷史)
+# 記錄不同頻道的對話紀錄
 channel_sessions = {}
 
 # 3. 設定 Discord 機器人
@@ -56,8 +57,13 @@ async def on_message(message):
         channel_sessions[channel_id] = chat
         
         async with message.channel.typing():
-            response = chat.send_message("請隨機生成一個新的 EMT 模擬案例（可選創傷或內科），並提供派遣資訊，保持被動與破碎化。")
-            await message.channel.send(f"🚑 **【虛擬救護模擬系統啟動】** 🚑\n{response.text}")
+            try:
+                response = await chat.send_message_async("請隨機生成一個新的 EMT 模擬案例（可選創傷或內科），並提供派遣資訊，保持被動與破碎化。")
+                await message.channel.send(f"🚑 **【虛擬救護模擬系統啟動】** 🚑\n{response.text}")
+            except Exception as e:
+                # 兼容不同版本 SDK 的備用寫法
+                response = chat.send_message("請隨機生成一個新的 EMT 模擬案例（可選創傷或內科），並提供派遣資訊，保持被動與破碎化。")
+                await message.channel.send(f"🚑 **【虛擬救護模擬系統啟動】** 🚑\n{response.text}")
         return
 
     # 指令：重置案例
@@ -72,10 +78,13 @@ async def on_message(message):
         chat = channel_sessions[channel_id]
         async with message.channel.typing():
             try:
-                response = chat.send_message(user_msg)
+                try:
+                    response = await chat.send_message_async(user_msg)
+                except:
+                    response = chat.send_message(user_msg)
+                    
                 bot_reply = response.text
                 
-                # 避免超過 Discord 2000 字限制
                 if len(bot_reply) > 1900:
                     for i in range(0, len(bot_reply), 1900):
                         await message.channel.send(bot_reply[i:i+1900])
@@ -84,7 +93,7 @@ async def on_message(message):
             except Exception as e:
                 await message.channel.send(f"⚠️ 發生錯誤：{e}")
 
-# 4. 保持 Render 雲端伺服器不休眠的 Dummy 網頁
+# 4. 保持 Render 雲端伺服器不休眠的網頁
 app = Flask('')
 @app.route('/')
 def home():
