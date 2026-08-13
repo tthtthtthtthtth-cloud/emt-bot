@@ -2,37 +2,40 @@ import os
 import discord
 from google import genai
 from google.genai import types
+from google.genai.errors import APIError
 from flask import Flask
 from threading import Thread
- 
+
 # 1. 初始化 Google GenAI Client
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 實測挑選真正可連線的最新模型（自動避開退役模型）
-def get_working_model():
-    # 候選清單：包含 Google 官方永遠指向最新模型的別名
+# 全局快取使用的模型名稱，避免每次 !start 都浪費 API 額度
+CACHED_MODEL = 'gemini-1.5-flash'
+
+# 僅在機器人啟動時測試一次可用模型
+def init_working_model():
+    global CACHED_MODEL
     candidates = [
+        'gemini-1.5-flash',
+        'gemini-2.0-flash',
         'gemini-flash-latest',
-        'gemini-3.5-flash-lite',
-        'gemini-3.6-flash',
-        'gemini-3.1-flash-lite'
+        'gemini-3.5-flash-lite'
     ]
     for model_name in candidates:
         try:
-            # 發送極微小文字進行實測，確定沒有 404 錯誤
             response = client.models.generate_content(
                 model=model_name,
                 contents="ping"
             )
             if response:
-                print(f"✅ 實測連線成功，採用模型：{model_name}")
-                return model_name
+                CACHED_MODEL = model_name
+                print(f"✅ 開機測試成功！全局採用模型：{CACHED_MODEL}")
+                return CACHED_MODEL
         except Exception as e:
-            print(f"測試模型 {model_name} 失敗，嘗試下一個...")
+            print(f"測試模型 {model_name} 額度受限或不可用，嘗試下一個...")
             
-    # 若測驗皆未過則回傳保底別名
-    return 'gemini-flash-latest'
+    return CACHED_MODEL
 
 # 2. 核心教練設定
 EMT_SYSTEM_PROMPT = """
@@ -54,6 +57,7 @@ EMT_SYSTEM_PROMPT = """
 現在，請等待學員輸入「!start」來開始一個隨機的模擬案例。
 """
 
+# 以 channel_id 為 Key 記錄不同頻道的對話階段，實現多頻道獨立運作
 channel_chats = {}
 
 # 3. 設定 Discord 機器人
@@ -64,6 +68,7 @@ discord_client = discord.Client(intents=intents)
 @discord_client.event
 async def on_ready():
     print(f'🤖 EMT AI 專業教練已上線：{discord_client.user}')
+    init_working_model()
 
 @discord_client.event
 async def on_message(message):
@@ -75,13 +80,16 @@ async def on_message(message):
 
     # 指令：開始新案例
     if user_msg == '!start':
+        # 🛡️ 防呆機制：如果本頻道已經有案例在進行，提示玩家先 reset
+        if channel_id in channel_chats:
+            await message.channel.send("⚠️ **【已有進行中的案例】** 本頻道目前已有急救測驗進行中！如欲放棄並開新局，請先輸入 `!reset`。")
+            return
+
         async with message.channel.typing():
             try:
-                # 實測取得目前真正可運作的模型名稱
-                working_model = get_working_model()
-
+                # 建立專屬於此頻道 (channel_id) 的對話 Session
                 chat = client.chats.create(
-                    model=working_model,
+                    model=CACHED_MODEL,
                     config=types.GenerateContentConfig(
                         system_instruction=EMT_SYSTEM_PROMPT,
                         temperature=0.7
@@ -90,7 +98,12 @@ async def on_message(message):
                 channel_chats[channel_id] = chat
                 
                 response = chat.send_message("請隨機生成一個新的 EMT 模擬案例（可選創傷或內科），並提供派遣資訊，保持被動與破碎化。")
-                await message.channel.send(f"🚑 **【虛擬救護模擬系統啟動】** (採用模型: `{working_model}`)\n{response.text}")
+                await message.channel.send(f"🚑 **【虛擬救護模擬系統啟動】** (採用模型: `{CACHED_MODEL}`)\n{response.text}")
+            except APIError as e:
+                if '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e):
+                    await message.channel.send("⚠️ **【觸發流量冷卻機制】** Google AI 免費版每分鐘請求次數上限，請等待約 **1 分鐘** 後再輸入 `!start`。")
+                else:
+                    await message.channel.send(f"❌ **【啟動發生錯誤】**:\n```{str(e)}```")
             except Exception as e:
                 await message.channel.send(f"❌ **【啟動發生錯誤】**:\n```{str(e)}```")
         return
@@ -99,7 +112,9 @@ async def on_message(message):
     if user_msg == '!reset':
         if channel_id in channel_chats:
             del channel_chats[channel_id]
-        await message.channel.send("🔄 模擬器已重置。請輸入 `!start` 開始新案例。")
+            await message.channel.send("🔄 **【頻道已重置】** 本頻道的急救測驗已清除。請輸入 `!start` 開始新案例。")
+        else:
+            await message.channel.send("ℹ️ 本頻道目前沒有進行中的測驗。可以輸入 `!start` 開始測驗。")
         return
 
     # 一般互動對話
@@ -115,6 +130,11 @@ async def on_message(message):
                         await message.channel.send(bot_reply[i:i+1900])
                 else:
                     await message.channel.send(bot_reply)
+            except APIError as e:
+                if '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e):
+                    await message.channel.send("⚠️ **【對話頻率過快】** 已達到每分鐘請求上限，請稍微休息 **1 分鐘** 後繼續下達指令。")
+                else:
+                    await message.channel.send(f"❌ **【對話發生錯誤】**:\n```{str(e)}```")
             except Exception as e:
                 await message.channel.send(f"❌ **【對話發生錯誤】**:\n```{str(e)}```")
 
