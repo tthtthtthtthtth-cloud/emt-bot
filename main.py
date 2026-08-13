@@ -29,7 +29,7 @@ EMT_SYSTEM_PROMPT = """
 現在，請等待學員輸入「!start」來開始一個隨機的模擬案例。
 """
 
-# 記錄不同頻道的對話對話階段 (利用新版 chats 功能)
+# 記錄不同頻道的對話階段
 channel_chats = {}
 
 # 3. 設定 Discord 機器人
@@ -51,9 +51,9 @@ async def on_message(message):
 
     # 指令：開始新案例
     if user_msg == '!start':
-        # 建立一個帶有 System Instruction 的新對話連線
+        # 建立一個帶有 System Instruction 的新對話連線 (改用 gemini-2.0-flash)
         chat = client.chats.create(
-            model='gemini-2.5-flash',
+            model='gemini-2.0-flash',
             config=types.GenerateContentConfig(
                 system_instruction=EMT_SYSTEM_PROMPT,
                 temperature=0.7
