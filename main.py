@@ -1,12 +1,13 @@
 import os
 import discord
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from flask import Flask
 from threading import Thread
 
-# 1. 設定 Google Gemini API
+# 1. 初始化全新的 Google GenAI Client
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-genai.configure(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # 2. 核心教練設定
 EMT_SYSTEM_PROMPT = """
@@ -28,24 +29,21 @@ EMT_SYSTEM_PROMPT = """
 現在，請等待學員輸入「!start」來開始一個隨機的模擬案例。
 """
 
-# 使用目前最穩定的 Gemini 2.0 Flash 模型
-model = genai.GenerativeModel('gemini-2.0-flash', system_instruction=EMT_SYSTEM_PROMPT)
-
-# 記錄不同頻道的對話紀錄
-channel_sessions = {}
+# 記錄不同頻道的對話對話階段 (利用新版 chats 功能)
+channel_chats = {}
 
 # 3. 設定 Discord 機器人
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+discord_client = discord.Client(intents=intents)
 
-@client.event
+@discord_client.event
 async def on_ready():
-    print(f'🤖 EMT AI 教練已成功上線：{client.user}')
+    print(f'🤖 EMT AI 專業教練已上線：{discord_client.user}')
 
-@client.event
+@discord_client.event
 async def on_message(message):
-    if message.author == client.user:
+    if message.author == discord_client.user:
         return
 
     channel_id = message.channel.id
@@ -53,36 +51,37 @@ async def on_message(message):
 
     # 指令：開始新案例
     if user_msg == '!start':
-        chat = model.start_chat(history=[])
-        channel_sessions[channel_id] = chat
+        # 建立一個帶有 System Instruction 的新對話連線
+        chat = client.chats.create(
+            model='gemini-2.5-flash',
+            config=types.GenerateContentConfig(
+                system_instruction=EMT_SYSTEM_PROMPT,
+                temperature=0.7
+            )
+        )
+        channel_chats[channel_id] = chat
         
         async with message.channel.typing():
             try:
-                response = await chat.send_message_async("請隨機生成一個新的 EMT 模擬案例（可選創傷或內科），並提供派遣資訊，保持被動與破碎化。")
-                await message.channel.send(f"🚑 **【虛擬救護模擬系統啟動】** 🚑\n{response.text}")
-            except Exception as e:
-                # 兼容不同版本 SDK 的備用寫法
                 response = chat.send_message("請隨機生成一個新的 EMT 模擬案例（可選創傷或內科），並提供派遣資訊，保持被動與破碎化。")
                 await message.channel.send(f"🚑 **【虛擬救護模擬系統啟動】** 🚑\n{response.text}")
+            except Exception as e:
+                await message.channel.send(f"⚠️ 啟動錯誤：{e}")
         return
 
     # 指令：重置案例
     if user_msg == '!reset':
-        if channel_id in channel_sessions:
-            del channel_sessions[channel_id]
+        if channel_id in channel_chats:
+            del channel_chats[channel_id]
         await message.channel.send("🔄 模擬器已重置。請輸入 `!start` 開始新案例。")
         return
 
     # 一般互動對話
-    if channel_id in channel_sessions:
-        chat = channel_sessions[channel_id]
+    if channel_id in channel_chats:
+        chat = channel_chats[channel_id]
         async with message.channel.typing():
             try:
-                try:
-                    response = await chat.send_message_async(user_msg)
-                except:
-                    response = chat.send_message(user_msg)
-                    
+                response = chat.send_message(user_msg)
                 bot_reply = response.text
                 
                 if len(bot_reply) > 1900:
@@ -93,7 +92,7 @@ async def on_message(message):
             except Exception as e:
                 await message.channel.send(f"⚠️ 發生錯誤：{e}")
 
-# 4. 保持 Render 雲端伺服器不休眠的網頁
+# 4. 保持 Render 伺服器不休眠的網頁
 app = Flask('')
 @app.route('/')
 def home():
@@ -110,6 +109,6 @@ if __name__ == '__main__':
     keep_alive()
     DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
     if DISCORD_TOKEN:
-        client.run(DISCORD_TOKEN)
+        discord_client.run(DISCORD_TOKEN)
     else:
         print("錯誤：找不到 DISCORD_TOKEN 環境變數。")
