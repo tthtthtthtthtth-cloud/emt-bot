@@ -4,7 +4,7 @@ from google import genai
 from google.genai import types
 from flask import Flask
 from threading import Thread
-
+ 
 # 1. 初始化 Google GenAI Client
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 client = genai.Client(api_key=GEMINI_API_KEY)
