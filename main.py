@@ -37,7 +37,7 @@ def init_working_model():
             
     return CACHED_MODEL
 
-# 2. 核心教練設定
+# 2. 核心教練設定 (已修正最後一行的啟動邏輯)
 EMT_SYSTEM_PROMPT = """
 你是一個嚴格的台灣「緊急醫療救護 (EMT)」模擬訓練教官。
 請完全依照台灣衛福部法規、消防署 EMT-1/EMT-2 教科書與標準急救指引來進行評估。
@@ -54,7 +54,8 @@ EMT_SYSTEM_PROMPT = """
 4. 結案報告 (AAR)：
    - 當學員完成任務、送醫或病患死亡時，提供詳細的 0-100 分考核報告與條列式檢檢。
 
-現在，請等待學員輸入「!start」來開始一個隨機的模擬案例。
+【啟動觸發】
+當接獲學員啟動指令時，請立即隨機生成一個新的 EMT 模擬案例，並直接輸出「派遣資訊」，開始被動與破碎化模式。
 """
 
 # 以 channel_id 為 Key 記錄不同頻道的對話階段，實現多頻道獨立運作
@@ -80,14 +81,14 @@ async def on_message(message):
 
     # 指令：開始新案例
     if user_msg == '!start':
-        # 🛡️ 防呆機制：如果本頻道已經有案例在進行，提示玩家先 reset
+        # 防呆機制：如果本頻道已經有案例在進行，提示玩家先 reset
         if channel_id in channel_chats:
             await message.channel.send("⚠️ **【已有進行中的案例】** 本頻道目前已有急救測驗進行中！如欲放棄並開新局，請先輸入 `!reset`。")
             return
 
         async with message.channel.typing():
             try:
-                # 建立專屬於此頻道 (channel_id) 的對話 Session
+                # 建立專屬於此頻道的對話 Session
                 chat = client.chats.create(
                     model=CACHED_MODEL,
                     config=types.GenerateContentConfig(
@@ -97,8 +98,9 @@ async def on_message(message):
                 )
                 channel_chats[channel_id] = chat
                 
-                response = chat.send_message("請隨機生成一個新的 EMT 模擬案例（可選創傷或內科），並提供派遣資訊，保持被動與破碎化。")
-                await message.channel.send(f"🚑 **【虛擬救護模擬系統啟動】** (採用模型: `{CACHED_MODEL}`)\n{response.text}")
+                # 明確命令 AI 直接輸出派遣資訊
+                response = chat.send_message("【學員已輸入 !start】請立即隨機生成一個新的 EMT 模擬案例（創傷或內科），並直接給出派遣資訊，開始第一步。")
+                await message.channel.send(f"🚑 **【虛擬救護模擬系統啟動】** (採用模型: `{CACHED_MODEL}`)\n\n{response.text}")
             except APIError as e:
                 if '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e):
                     await message.channel.send("⚠️ **【觸發流量冷卻機制】** Google AI 免費版每分鐘請求次數上限，請等待約 **1 分鐘** 後再輸入 `!start`。")
