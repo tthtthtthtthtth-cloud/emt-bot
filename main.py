@@ -9,30 +9,30 @@ from threading import Thread
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 自動向 Google 查詢當前 API Key 真正支援的可用的 Gemini 模型 ID
-def get_available_model():
-    try:
-        flash_models = []
-        other_models = []
-        # 向 Google 請求可用模型清單
-        for m in client.models.list():
-            actions = getattr(m, 'supported_actions', []) or []
-            if 'generateContent' in actions:
-                name = m.name.replace('models/', '')
-                if 'flash' in name.lower():
-                    flash_models.append(name)
-                else:
-                    other_models.append(name)
-        
-        # 優先選擇 Flash 系列模型
-        if flash_models:
-            return flash_models[0]
-        if other_models:
-            return other_models[0]
-    except Exception as e:
-        print(f"無法自動取得模型清單: {e}")
-    # 預設備用名稱
-    return 'gemini-1.5-flash'
+# 實測挑選真正可連線的最新模型（自動避開退役模型）
+def get_working_model():
+    # 候選清單：包含 Google 官方永遠指向最新模型的別名
+    candidates = [
+        'gemini-flash-latest',
+        'gemini-3.5-flash-lite',
+        'gemini-3.6-flash',
+        'gemini-3.1-flash-lite'
+    ]
+    for model_name in candidates:
+        try:
+            # 發送極微小文字進行實測，確定沒有 404 錯誤
+            response = client.models.generate_content(
+                model=model_name,
+                contents="ping"
+            )
+            if response:
+                print(f"✅ 實測連線成功，採用模型：{model_name}")
+                return model_name
+        except Exception as e:
+            print(f"測試模型 {model_name} 失敗，嘗試下一個...")
+            
+    # 若測驗皆未過則回傳保底別名
+    return 'gemini-flash-latest'
 
 # 2. 核心教練設定
 EMT_SYSTEM_PROMPT = """
@@ -77,12 +77,11 @@ async def on_message(message):
     if user_msg == '!start':
         async with message.channel.typing():
             try:
-                # 自動搜尋並取得目前金鑰可用的模型
-                active_model = get_available_model()
-                print(f"目前對話採用的模型為: {active_model}")
+                # 實測取得目前真正可運作的模型名稱
+                working_model = get_working_model()
 
                 chat = client.chats.create(
-                    model=active_model,
+                    model=working_model,
                     config=types.GenerateContentConfig(
                         system_instruction=EMT_SYSTEM_PROMPT,
                         temperature=0.7
@@ -91,7 +90,7 @@ async def on_message(message):
                 channel_chats[channel_id] = chat
                 
                 response = chat.send_message("請隨機生成一個新的 EMT 模擬案例（可選創傷或內科），並提供派遣資訊，保持被動與破碎化。")
-                await message.channel.send(f"🚑 **【虛擬救護模擬系統啟動】** (使用模型: `{active_model}`)\n{response.text}")
+                await message.channel.send(f"🚑 **【虛擬救護模擬系統啟動】** (採用模型: `{working_model}`)\n{response.text}")
             except Exception as e:
                 await message.channel.send(f"❌ **【啟動發生錯誤】**:\n```{str(e)}```")
         return
