@@ -51,9 +51,9 @@ async def on_message(message):
 
     # 指令：開始新案例
     if user_msg == '!start':
-        # 建立一個帶有 System Instruction 的新對話連線 (改用 gemini-2.0-flash)
+        # 建立一個帶有 System Instruction 的新對話連線 (改用 gemini-2.5-flash-lite)
         chat = client.chats.create(
-            model='gemini-2.0-flash',
+            model='gegemini-2.5-flash-lite',
             config=types.GenerateContentConfig(
                 system_instruction=EMT_SYSTEM_PROMPT,
                 temperature=0.7
