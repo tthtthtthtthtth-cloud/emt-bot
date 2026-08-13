@@ -28,7 +28,7 @@ EMT_SYSTEM_PROMPT = """
 現在，請等待學員輸入「!start」來開始一個隨機的模擬案例（可選創傷或內科）。
 """
 
-model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=EMT_SYSTEM_PROMPT)
+model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=EMT_SYSTEM_PROMPT)
 
 # 記錄不同頻道的遊戲進度 (對話歷史)
 channel_sessions = {}
