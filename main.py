@@ -90,4 +90,93 @@ async def daily_restart_task():
         os._exit(0) # 結束 Python 程序，Render 雲端會自動將其重開機
 
 @discord_client.event
-async def
+async def on_ready():
+    print(f'🤖 EMT AI 專業教練已上線：{discord_client.user}')
+    init_working_model()
+    # 啟動半夜 3 點自動重啟排程
+    discord_client.loop.create_task(daily_restart_task())
+
+@discord_client.event
+async def on_message(message):
+    if message.author == discord_client.user:
+        return
+
+    channel_id = message.channel.id
+    user_msg = message.content.strip()
+
+    # 指令：開始新案例
+    if user_msg == '!start':
+        if channel_id in channel_chats:
+            await message.channel.send("⚠️ **【已有進行中的案例】** 本頻道目前已有急救測驗進行中！如欲放棄並開新局，請先輸入 `!reset`。")
+            return
+
+        try:
+            chat = client.chats.create(
+                model=CACHED_MODEL,
+                config=types.GenerateContentConfig(
+                    system_instruction=EMT_SYSTEM_PROMPT,
+                    temperature=0.7
+                )
+            )
+            channel_chats[channel_id] = chat
+            
+            response = chat.send_message("【學員已輸入 !start】請立即隨機生成一個新的 EMT 模擬案例（創傷或內科），並直接給出派遣資訊，開始第一步。")
+            await message.channel.send(f"🚑 **【虛擬救護模擬系統啟動】** (採用模型: `{CACHED_MODEL}`)\n\n{response.text}")
+        except APIError as e:
+            if '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e):
+                await message.channel.send("⚠️ **【觸發流量冷卻機制】** Google AI 免費版次數限制，請等待約 1 分鐘後再輸入 `!start`。")
+            else:
+                await message.channel.send(f"❌ **【啟動發生錯誤】**:\n```{str(e)}```")
+        except Exception as e:
+            await message.channel.send(f"❌ **【啟動發生錯誤】**:\n```{str(e)}```")
+        return
+
+    # 指令：重置案例
+    if user_msg == '!reset':
+        if channel_id in channel_chats:
+            del channel_chats[channel_id]
+            await message.channel.send("🔄 **【頻道已重置】** 本頻道的急救測驗已清除。請輸入 `!start` 開始新案例。")
+        else:
+            await message.channel.send("ℹ️ 本頻道目前沒有進行中的測驗。可以輸入 `!start` 開始測驗。")
+        return
+
+    # 一般互動對話
+    if channel_id in channel_chats:
+        chat = channel_chats[channel_id]
+        try:
+            response = chat.send_message(user_msg)
+            bot_reply = response.text
+            
+            if len(bot_reply) > 1900:
+                for i in range(0, len(bot_reply), 1900):
+                    await message.channel.send(bot_reply[i:i+1900])
+            else:
+                await message.channel.send(bot_reply)
+        except APIError as e:
+            if '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e):
+                await message.channel.send("⚠️ **【對話頻率過快】** 已達到每分鐘請求上限，請稍微休息 1 分鐘後繼續下達指令。")
+            else:
+                await message.channel.send(f"❌ **【對話發生錯誤】**:\n```{str(e)}```")
+        except Exception as e:
+            await message.channel.send(f"❌ **【對話發生錯誤】**:\n```{str(e)}```")
+
+# 5. 保持 Render 伺服器不休眠的網頁
+app = Flask('')
+@app.route('/')
+def home():
+    return "EMT Bot is active!"
+
+def run_web():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.start()
+
+if __name__ == '__main__':
+    keep_alive()
+    DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
+    if DISCORD_TOKEN:
+        discord_client.run(DISCORD_TOKEN)
+    else:
+        print("錯誤：找不到 DISCORD_TOKEN 環境變數。")
