@@ -70,23 +70,38 @@ SAFETY_SETTINGS = [
 AFC_OFF = types.AutomaticFunctionCallingConfig(disable=True)
 
 
+def _is_model_missing(err_str):
+    """區分「這個模型真的不存在」vs「只是暫時打不通（額度、忙碌、網路）」。"""
+    return any(
+        k in err_str
+        for k in ('404', 'NOT_FOUND', 'not found', 'is not supported',
+                  'no longer available', 'INVALID_ARGUMENT')
+    )
+
+
 def init_working_model():
     """開機時測試一次可用模型（同步函式，請用 asyncio.to_thread 呼叫）。"""
     global CACHED_MODEL
     for model_name in MODEL_CANDIDATES:
         try:
-            resp = genai_client.models.generate_content(
+            genai_client.models.generate_content(
                 model=model_name,
                 contents='ping',
                 config=types.GenerateContentConfig(automatic_function_calling=AFC_OFF),
             )
-            if resp is not None:
-                CACHED_MODEL = model_name
-                log.info('✅ 開機測試成功，全局採用模型：%s', CACHED_MODEL)
-                return CACHED_MODEL
+            CACHED_MODEL = model_name
+            log.info('✅ 開機測試成功，全局採用模型：%s', CACHED_MODEL)
+            return CACHED_MODEL
         except Exception as e:
-            log.warning('模型 %s 不可用（%s），嘗試下一個…', model_name, type(e).__name__)
-    log.error('⚠️ 所有候選模型皆測試失敗，仍先採用 %s', CACHED_MODEL)
+            err = str(e)
+            log.warning('模型 %s 測試失敗：%s', model_name, err[:300])
+            if not _is_model_missing(err):
+                # 429 額度用盡、503 忙碌、網路問題 → 模型本身沒事，不該降級
+                CACHED_MODEL = model_name
+                log.warning('   → 判定為暫時性錯誤，仍採用 %s（實際請求時會自動重試）', CACHED_MODEL)
+                return CACHED_MODEL
+            log.warning('   → 判定為模型已下架，嘗試下一個…')
+    log.error('⚠️ 所有候選模型皆已下架，仍先採用 %s，請儘快更新 MODEL_CANDIDATES', CACHED_MODEL)
     return CACHED_MODEL
 
 
