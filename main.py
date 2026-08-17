@@ -29,11 +29,13 @@ log = logging.getLogger('emt-bot')
 TW_TZ = timezone(timedelta(hours=8))
 
 # 閒置多久自動回收 session（分鐘）
-IDLE_TIMEOUT_MIN = 120
+IDLE_TIMEOUT_MIN = 45
 # 清理排程間隔（分鐘）
-CLEANUP_INTERVAL_MIN = 10
-# 單一案例最多輪數，超過提醒學員收尾（避免 context 無限膨脹）
-MAX_TURNS_WARN = 60
+CLEANUP_INTERVAL_MIN = 5
+# 單一案例輪數：達到這個數字時提醒學員收尾
+MAX_TURNS_WARN = 40
+# 單一案例輪數硬上限：達到就強制結束，避免對話歷史吃爆 512MB
+MAX_TURNS_HARD = 60
 
 DISCORD_LIMIT = 1900
 
@@ -121,6 +123,18 @@ async def send_msg_with_retry(chat, text, max_retries=3):
                 await asyncio.sleep(wait_sec)
                 continue
             raise
+
+
+def get_memory_mb():
+    """讀取本 process 實際佔用的實體記憶體（MB）。免費層無 Metrics，靠這個自行監控。"""
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) / 1024
+    except Exception:
+        pass
+    return -1.0
 
 
 def extract_text(response):
@@ -240,7 +254,7 @@ HELP_TEXT = (
     "`!help` — 顯示這則說明\n\n"
     "案例進行中，直接用自然語言下達處置指令即可"
     "（例如：`我先確認現場安全`、`檢查意識反應`、`量血壓`）。\n"
-    f"⏱️ 閒置超過 {IDLE_TIMEOUT_MIN} 分鐘的案例會自動關閉。"
+    f"⏱️ 閒置超過 {IDLE_TIMEOUT_MIN} 分鐘的案例會自動關閉，單一案例上限 {MAX_TURNS_HARD} 輪。"
 )
 
 
@@ -311,7 +325,9 @@ async def cleanup_task():
                     except discord.HTTPException:
                         pass
             if expired:
-                log.info('已回收 %s 個閒置 session，目前進行中：%s', len(expired), len(sessions))
+                log.info('已回收 %s 個閒置 session', len(expired))
+            log.info('[監控] 記憶體 %.0fMB / 512MB，進行中 session：%d',
+                     get_memory_mb(), len(sessions))
         except Exception:
             log.exception('cleanup_task 發生例外')
 
@@ -352,15 +368,17 @@ async def on_message(message):
         s = sessions.get(channel_id)
         if not s:
             await message.channel.send(
-                f"ℹ️ 本頻道目前沒有進行中的案例。（全局模型：`{CACHED_MODEL}`）"
+                f"ℹ️ 本頻道目前沒有進行中的案例。\n"
+                f"全局模型：`{CACHED_MODEL}`｜記憶體：{get_memory_mb():.0f}MB / 512MB"
             )
         else:
             await message.channel.send(
                 f"📋 **【本頻道狀態】**\n"
                 f"模型：`{s.model}`\n"
                 f"開始時間：{s.started_at.strftime('%Y-%m-%d %H:%M')}（台灣時間）\n"
-                f"已互動輪數：{s.turns}\n"
-                f"閒置：{s.idle_minutes():.0f} 分鐘"
+                f"已互動輪數：{s.turns} / {MAX_TURNS_HARD}\n"
+                f"閒置：{s.idle_minutes():.0f} 分鐘（超過 {IDLE_TIMEOUT_MIN} 分鐘自動關閉）\n"
+                f"記憶體：{get_memory_mb():.0f}MB / 512MB"
             )
         return
 
@@ -434,10 +452,16 @@ async def on_message(message):
             session.touch()
             await send_long(message.channel, text)
 
-            if session.turns == MAX_TURNS_WARN:
+            if session.turns >= MAX_TURNS_HARD:
+                sessions.pop(channel_id, None)
                 await message.channel.send(
-                    f"ℹ️ 本案例已進行 {MAX_TURNS_WARN} 輪，對話越長回應越慢也越貴。"
-                    "建議儘快完成後送並請教官結案（或 `!reset` 重開）。"
+                    f"🛑 **【案例強制結束】** 已達 {MAX_TURNS_HARD} 輪上限，"
+                    "對話歷史過長會影響穩定性。請輸入 `!start` 開始新案例。"
+                )
+            elif session.turns == MAX_TURNS_WARN:
+                await message.channel.send(
+                    f"ℹ️ 本案例已進行 {MAX_TURNS_WARN} 輪，"
+                    f"最多可到 {MAX_TURNS_HARD} 輪。建議儘快完成後送並請教官結案。"
                 )
         except Exception as e:
             await reply_api_error(message.channel, e, stage='對話')
@@ -451,7 +475,8 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return f'EMT Bot is active! sessions={len(sessions)} model={CACHED_MODEL}'
+    return (f'EMT Bot is active! sessions={len(sessions)} '
+            f'model={CACHED_MODEL} mem={get_memory_mb():.0f}MB')
 
 
 @app.route('/healthz')
