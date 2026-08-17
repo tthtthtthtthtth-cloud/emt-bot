@@ -48,12 +48,14 @@ if not GEMINI_API_KEY:
 
 genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 依 2026 年現況排序：新的在前，最後放 alias 保底
+# 排序依據：免費層「每日請求數」配額，不是模型能力。
+# gemini-3.6-flash 免費層每天僅 20 次（GenerateRequestsPerDayPerProjectPerModel-FreeTier），
+# 完全不夠訓練使用，因此放到最後。用量可查 https://ai.dev/rate-limit
 MODEL_CANDIDATES = [
-    'gemini-3.6-flash',
-    'gemini-3.5-flash',
     'gemini-3.5-flash-lite',
+    'gemini-3.5-flash',
     'gemini-flash-latest',
+    'gemini-3.6-flash',
 ]
 CACHED_MODEL = MODEL_CANDIDATES[0]
 
@@ -114,12 +116,17 @@ async def send_msg_with_retry(chat, text, max_retries=3):
             return await asyncio.to_thread(chat.send_message, text)
         except APIError as e:
             err = str(e)
+            # 每日配額用盡時重試毫無意義，只會多燒請求數，直接放棄
+            if 'PerDay' in err or 'per day' in err.lower():
+                log.error('每日配額已用盡：%s', err[:400])
+                raise
             retryable = any(
                 k in err for k in ('503', 'UNAVAILABLE', '429', 'RESOURCE_EXHAUSTED')
             )
             if retryable and attempt < max_retries:
                 wait_sec = 2 * (attempt + 1)
-                log.warning('Google API 忙碌，%s 秒後進行第 %s 次重試…', wait_sec, attempt + 1)
+                log.warning('Google API 忙碌（%s 秒後重試 %s/%s）：%s',
+                            wait_sec, attempt + 1, max_retries, err[:200])
                 await asyncio.sleep(wait_sec)
                 continue
             raise
@@ -292,6 +299,11 @@ async def reply_api_error(channel, e, stage='對話'):
             "⚠️ **【Google AI 伺服器忙碌中】** 已重試 3 次仍未成功，"
             "請稍候約 10 秒後**重新發送一次剛才的指令**。"
         )
+    elif 'PerDay' in err or 'per day' in err.lower():
+        await channel.send(
+            f"🚫 **【今日免費配額已用盡】** 模型 `{CACHED_MODEL}` 已達每日請求上限。\n"
+            "配額會在台灣時間**下午 3 點左右**重置，屆時即可繼續使用。"
+        )
     elif '429' in err or 'RESOURCE_EXHAUSTED' in err:
         await channel.send(
             "⚠️ **【觸發流量冷卻機制】** 已達每分鐘請求上限，請休息約 1 分鐘後再繼續。"
@@ -344,7 +356,9 @@ async def on_ready():
         log.info('（偵測到重新連線，略過重複初始化）')
         return
     _bg_started = True
-    await asyncio.to_thread(init_working_model)
+    # 不做開機探測：每次探測都會消耗一次每日配額，頻繁部署時很傷。
+    # 模型直接採用 MODEL_CANDIDATES[0]，真的失效時會由 !start 的錯誤訊息告知。
+    log.info('採用模型：%s（候選：%s）', CACHED_MODEL, ', '.join(MODEL_CANDIDATES[1:]))
     discord_client.loop.create_task(cleanup_task())
 
 
