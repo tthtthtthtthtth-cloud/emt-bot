@@ -1,5 +1,5 @@
-discord.py
-google-genai
-flask
+discord.py>=2.3.0
+google-genai>=1.0.0
+flask>=3.0.0
+waitress>=3.0.0
 gunicorn
-waitress
