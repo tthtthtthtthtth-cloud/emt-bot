@@ -1,12 +1,11 @@
-yaml
 name: Keep Render Awake
 
 on:
   schedule:
-    # cron 一律 UTC。台灣 = UTC+8
-    # 台灣 07:00-07:59 → UTC 23:00-23:59
+    # cron uses UTC. Taiwan = UTC+8
+    # Taiwan 07:00-07:59 -> UTC 23:00-23:59
     - cron: '*/10 23 * * *'
-    # 台灣 08:00-01:59 → UTC 00:00-17:59
+    # Taiwan 08:00-01:59 -> UTC 00:00-17:59
     - cron: '*/10 0-17 * * *'
   workflow_dispatch:
 
