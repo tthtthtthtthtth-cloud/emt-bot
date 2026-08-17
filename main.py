@@ -20,6 +20,10 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
 )
+# 這些 library 每次請求都會印一行，長跑會把 log 洗爆
+for _noisy in ('httpx', 'httpcore', 'google_genai.models', 'google_genai.types', 'werkzeug'):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 log = logging.getLogger('emt-bot')
 
 TW_TZ = timezone(timedelta(hours=8))
@@ -62,6 +66,9 @@ SAFETY_SETTINGS = [
     )
 ]
 
+# 本 bot 沒有使用任何 tools，關掉自動函式呼叫可省開銷並消除 SDK warning
+AFC_OFF = types.AutomaticFunctionCallingConfig(disable=True)
+
 
 def init_working_model():
     """開機時測試一次可用模型（同步函式，請用 asyncio.to_thread 呼叫）。"""
@@ -71,6 +78,7 @@ def init_working_model():
             resp = genai_client.models.generate_content(
                 model=model_name,
                 contents='ping',
+                config=types.GenerateContentConfig(automatic_function_calling=AFC_OFF),
             )
             if resp is not None:
                 CACHED_MODEL = model_name
@@ -196,6 +204,7 @@ def create_session():
         config=types.GenerateContentConfig(
             system_instruction=EMT_SYSTEM_PROMPT,
             safety_settings=SAFETY_SETTINGS,
+            automatic_function_calling=AFC_OFF,
         ),
     )
     return Session(chat, CACHED_MODEL)
@@ -292,9 +301,18 @@ async def cleanup_task():
             log.exception('cleanup_task 發生例外')
 
 
+_bg_started = False
+
+
 @discord_client.event
 async def on_ready():
+    """注意：discord.py 每次「重連」都會再觸發一次 on_ready，需自行防重入。"""
+    global _bg_started
     log.info('🤖 EMT AI 專業教練已上線：%s', discord_client.user)
+    if _bg_started:
+        log.info('（偵測到重新連線，略過重複初始化）')
+        return
+    _bg_started = True
     await asyncio.to_thread(init_working_model)
     discord_client.loop.create_task(cleanup_task())
 
@@ -446,4 +464,5 @@ if __name__ == '__main__':
     DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
     if not DISCORD_TOKEN:
         raise SystemExit('錯誤：找不到 DISCORD_TOKEN 環境變數。')
-    discord_client.run(DISCORD_TOKEN)
+    # log_handler=None：沿用上面的 basicConfig，避免 discord.py 另掛 handler 導致重複輸出
+    discord_client.run(DISCORD_TOKEN, log_handler=None)
