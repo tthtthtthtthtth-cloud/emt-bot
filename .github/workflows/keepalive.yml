@@ -4,9 +4,9 @@ on:
   schedule:
     # cron uses UTC. Taiwan = UTC+8
     # Taiwan 07:00-07:59 -> UTC 23:00-23:59
-    - cron: '*/10 23 * * *'
+    - cron: '*/5 23 * * *'
     # Taiwan 08:00-01:59 -> UTC 00:00-17:59
-    - cron: '*/10 0-17 * * *'
+    - cron: '*/5 0-17 * * *'
   workflow_dispatch:
 
 jobs:
