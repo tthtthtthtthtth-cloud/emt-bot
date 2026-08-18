@@ -1,4 +1,5 @@
 import os
+import time
 import random
 import asyncio
 import logging
@@ -38,6 +39,11 @@ MAX_TURNS_WARN = 40
 MAX_TURNS_HARD = 60
 
 DISCORD_LIMIT = 1900
+
+# 同一頻道兩次 !start 之間至少間隔幾秒（防連按把 Discord API 打爆）
+START_COOLDOWN_SEC = 20
+# 偵測到 Discord 全域 429 後，全機器人靜默幾秒（讓封鎖自然解除）
+DISCORD_BLOCK_COOLDOWN_SEC = 300
 
 # ---------------------------------------------------------------------------
 # 1. Google GenAI Client
@@ -232,6 +238,51 @@ class Session:
 
 sessions = {}
 channel_locks = defaultdict(asyncio.Lock)
+# 每個頻道最後一次執行 !start 的時間（不論成功失敗），用來擋連按
+last_start_at = {}
+# 偵測到 Discord 全域限流時，記錄「在此時間之前一律靜默」
+discord_blocked_until = 0.0
+
+
+def is_discord_blocked():
+    return time.monotonic() < discord_blocked_until
+
+
+def note_discord_block():
+    """被 Discord 全域限流時呼叫：讓機器人整個安靜下來，別再火上加油。"""
+    global discord_blocked_until
+    discord_blocked_until = time.monotonic() + DISCORD_BLOCK_COOLDOWN_SEC
+    log.error('⛔ 遭 Discord 全域限流，暫停所有回應 %s 秒', DISCORD_BLOCK_COOLDOWN_SEC)
+
+
+async def safe_send(channel, content):
+    """發訊息的統一入口：被 Discord 限流時直接放棄，不再堆疊請求。"""
+    if is_discord_blocked():
+        return False
+    try:
+        await channel.send(content)
+        return True
+    except discord.HTTPException as e:
+        if e.status == 429:
+            note_discord_block()
+        else:
+            log.warning('發送訊息失敗：%s', e)
+        return False
+
+
+class _NullTyping:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def safe_typing(channel):
+    """打字指示只是裝飾，被限流時就不要送，免得把情況弄得更糟。"""
+    if is_discord_blocked():
+        return _NullTyping()
+    return channel.typing()
 
 
 def create_session():
@@ -287,34 +338,50 @@ def split_message(text, limit=DISCORD_LIMIT):
 
 async def send_long(channel, text):
     for chunk in split_message(text):
-        await channel.send(chunk)
+        if not await safe_send(channel, chunk):
+            break
 
 
 async def reply_api_error(channel, e, stage='對話'):
     """log 完整錯誤，但只回給使用者可讀的訊息。"""
+    # Discord 自己的例外不該當成 Gemini 錯誤處理，更不該再發訊息火上加油
+    if isinstance(e, discord.HTTPException):
+        if e.status == 429:
+            note_discord_block()
+        else:
+            log.warning('%s 階段 Discord 發送失敗：%s', stage, e)
+        return
+
     log.exception('%s 階段發生錯誤', stage)
     err = str(e)
     if '503' in err or 'UNAVAILABLE' in err:
-        await channel.send(
+        await safe_send(
+            channel,
             "⚠️ **【Google AI 伺服器忙碌中】** 已重試 3 次仍未成功，"
             "請稍候約 10 秒後**重新發送一次剛才的指令**。"
         )
     elif 'PerDay' in err or 'per day' in err.lower():
-        await channel.send(
+        await safe_send(
+            channel,
             f"🚫 **【今日免費配額已用盡】** 模型 `{CACHED_MODEL}` 已達每日請求上限。\n"
             "配額會在台灣時間**下午 3 點左右**重置，屆時即可繼續使用。"
         )
     elif '429' in err or 'RESOURCE_EXHAUSTED' in err:
-        await channel.send(
+        await safe_send(
+            channel,
             "⚠️ **【觸發流量冷卻機制】** 已達每分鐘請求上限，請休息約 1 分鐘後再繼續。"
         )
     elif '404' in err or 'not found' in err.lower():
-        await channel.send(
+        await safe_send(
+            channel,
             f"❌ **【模型不可用】** 目前設定的模型 `{CACHED_MODEL}` 已無法使用，"
             "請管理員更新模型名稱後重新部署。"
         )
     else:
-        await channel.send(f"❌ **【{stage}發生錯誤】** 請稍後再試，詳細訊息已記錄於伺服器日誌。")
+        await safe_send(
+            channel,
+            f"❌ **【{stage}發生錯誤】** 請稍後再試，詳細訊息已記錄於伺服器日誌。"
+        )
 
 
 # --- 背景任務：定期回收閒置 session ---------------------------------------
@@ -329,13 +396,11 @@ async def cleanup_task():
                 channel_locks.pop(cid, None)
                 channel = discord_client.get_channel(cid)
                 if channel:
-                    try:
-                        await channel.send(
-                            f"🧹 **【案例逾時關閉】** 本頻道案例閒置超過 {IDLE_TIMEOUT_MIN} 分鐘，"
-                            "已自動清除。輸入 `!start` 可開始新案例。"
-                        )
-                    except discord.HTTPException:
-                        pass
+                    await safe_send(
+                        channel,
+                        f"🧹 **【案例逾時關閉】** 本頻道案例閒置超過 {IDLE_TIMEOUT_MIN} 分鐘，"
+                        "已自動清除。輸入 `!start` 可開始新案例。"
+                    )
             if expired:
                 log.info('已回收 %s 個閒置 session', len(expired))
             log.info('[監控] 記憶體 %.0fMB / 512MB，進行中 session：%d',
@@ -367,6 +432,10 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    # 遭 Discord 全域限流期間完全靜默：任何回應都只會延長封鎖
+    if is_discord_blocked():
+        return
+
     channel_id = message.channel.id
     user_msg = message.content.strip()
     if not user_msg:
@@ -374,19 +443,21 @@ async def on_message(message):
 
     # --- !help ---
     if user_msg in ('!help', '!說明'):
-        await message.channel.send(HELP_TEXT)
+        await safe_send(message.channel, HELP_TEXT)
         return
 
     # --- !status ---
     if user_msg == '!status':
         s = sessions.get(channel_id)
         if not s:
-            await message.channel.send(
+            await safe_send(
+                message.channel,
                 f"ℹ️ 本頻道目前沒有進行中的案例。\n"
                 f"全局模型：`{CACHED_MODEL}`｜記憶體：{get_memory_mb():.0f}MB / 512MB"
             )
         else:
-            await message.channel.send(
+            await safe_send(
+                message.channel,
                 f"📋 **【本頻道狀態】**\n"
                 f"模型：`{s.model}`\n"
                 f"開始時間：{s.started_at.strftime('%Y-%m-%d %H:%M')}（台灣時間）\n"
@@ -400,40 +471,55 @@ async def on_message(message):
     if user_msg == '!reset':
         if sessions.pop(channel_id, None):
             channel_locks.pop(channel_id, None)
-            await message.channel.send(
+            await safe_send(
+                message.channel,
                 "🔄 **【頻道已重置】** 本頻道的急救測驗已清除。請輸入 `!start` 開始新案例。"
             )
         else:
-            await message.channel.send("ℹ️ 本頻道目前沒有進行中的測驗。可以輸入 `!start` 開始。")
+            await safe_send(message.channel, "ℹ️ 本頻道目前沒有進行中的測驗。可以輸入 `!start` 開始。")
         return
 
     # --- !start ---
     if user_msg == '!start':
+        # 冷卻檢查：不論上次成功或失敗都算，這樣連按不會產生額外請求
+        elapsed = time.monotonic() - last_start_at.get(channel_id, -9999)
+        if elapsed < START_COOLDOWN_SEC:
+            log.info('頻道 %s 的 !start 在冷卻中（剩 %.0f 秒），已忽略',
+                     channel_id, START_COOLDOWN_SEC - elapsed)
+            return
+
         if channel_id in sessions:
-            await message.channel.send(
+            last_start_at[channel_id] = time.monotonic()
+            await safe_send(
+                message.channel,
                 "⚠️ **【已有進行中的案例】** 本頻道目前已有急救測驗進行中！"
                 "如欲放棄並開新局，請先輸入 `!reset`。"
             )
             return
 
+        # 先記時間再執行，確保執行期間的連按一律被擋掉
+        last_start_at[channel_id] = time.monotonic()
+
         async with channel_locks[channel_id]:
             if channel_id in sessions:  # 雙重檢查，防連點
                 return
             try:
-                async with message.channel.typing():
+                async with safe_typing(message.channel):
                     session = await asyncio.to_thread(create_session)
                     response = await send_msg_with_retry(session.chat, build_start_prompt())
                     text = extract_text(response)
 
                 if not text:
-                    await message.channel.send(
-                        "⚠️ **【案例生成失敗】** 回覆內容被安全機制擋下，請再輸入一次 `!start`。"
+                    await safe_send(
+                        message.channel,
+                        "⚠️ **【案例生成失敗】** 回覆內容被安全機制擋下，請稍候再輸入 `!start`。"
                     )
                     return
 
                 sessions[channel_id] = session
                 session.touch()
-                await message.channel.send(
+                await safe_send(
+                    message.channel,
                     f"🚑 **【虛擬救護模擬系統啟動】** (模型：`{session.model}`)\n"
                     f"提示：輸入 `!help` 查看指令說明。\n"
                 )
@@ -453,12 +539,13 @@ async def on_message(message):
         if session is None:
             return
         try:
-            async with message.channel.typing():
+            async with safe_typing(message.channel):
                 response = await send_msg_with_retry(session.chat, user_msg)
                 text = extract_text(response)
 
             if not text:
-                await message.channel.send(
+                await safe_send(
+                    message.channel,
                     "⚠️ 這段回覆被安全機制擋下了，請換個方式描述你的處置，或輸入 `!reset` 重開。"
                 )
                 return
@@ -468,12 +555,14 @@ async def on_message(message):
 
             if session.turns >= MAX_TURNS_HARD:
                 sessions.pop(channel_id, None)
-                await message.channel.send(
+                await safe_send(
+                    message.channel,
                     f"🛑 **【案例強制結束】** 已達 {MAX_TURNS_HARD} 輪上限，"
                     "對話歷史過長會影響穩定性。請輸入 `!start` 開始新案例。"
                 )
             elif session.turns == MAX_TURNS_WARN:
-                await message.channel.send(
+                await safe_send(
+                    message.channel,
                     f"ℹ️ 本案例已進行 {MAX_TURNS_WARN} 輪，"
                     f"最多可到 {MAX_TURNS_HARD} 輪。建議儘快完成後送並請教官結案。"
                 )
